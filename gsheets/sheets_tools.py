@@ -377,9 +377,15 @@ async def format_sheet_range(
     text_color: Optional[str] = None,
     number_format_type: Optional[str] = None,
     number_format_pattern: Optional[str] = None,
+    bold: Optional[bool] = None,
+    italic: Optional[bool] = None,
+    underline: Optional[bool] = None,
+    strikethrough: Optional[bool] = None,
+    font_size: Optional[int] = None,
+    font_family: Optional[str] = None,
 ) -> str:
     """
-    Applies formatting to a range: background/text color and number/date formats.
+    Applies formatting to a range: background/text color, font styling, and number/date formats.
 
     Colors accept hex strings (#RRGGBB). Number formats follow Sheets types
     (e.g., NUMBER, NUMBER_WITH_GROUPING, CURRENCY, DATE, TIME, DATE_TIME,
@@ -394,6 +400,12 @@ async def format_sheet_range(
         text_color (Optional[str]): Hex text color (e.g., "#000000").
         number_format_type (Optional[str]): Sheets number format type (e.g., "DATE").
         number_format_pattern (Optional[str]): Optional custom pattern for the number format.
+        bold (Optional[bool]): Whether to make text bold.
+        italic (Optional[bool]): Whether to make text italic.
+        underline (Optional[bool]): Whether to underline text.
+        strikethrough (Optional[bool]): Whether to strikethrough text.
+        font_size (Optional[int]): Font size in points (e.g., 10, 12, 14).
+        font_family (Optional[str]): Font family name (e.g., "Arial", "Times New Roman").
 
     Returns:
         str: Confirmation of the applied formatting.
@@ -405,9 +417,19 @@ async def format_sheet_range(
         range_name,
     )
 
-    if not any([background_color, text_color, number_format_type]):
+    has_font_formatting = any([
+        bold is not None,
+        italic is not None,
+        underline is not None,
+        strikethrough is not None,
+        font_size is not None,
+        font_family is not None,
+    ])
+    if not any([background_color, text_color, number_format_type, has_font_formatting]):
         raise UserInputError(
-            "Provide at least one of background_color, text_color, or number_format_type."
+            "Provide at least one formatting option: background_color, text_color, "
+            "number_format_type, or font styling (bold, italic, underline, strikethrough, "
+            "font_size, font_family)."
         )
 
     bg_color_parsed = _parse_hex_color(background_color)
@@ -451,16 +473,43 @@ async def format_sheet_range(
     if bg_color_parsed:
         user_entered_format["backgroundColor"] = bg_color_parsed
         fields.append("userEnteredFormat.backgroundColor")
+
+    # Build textFormat with all font properties
+    text_format = {}
     if text_color_parsed:
-        user_entered_format["textFormat"] = {"foregroundColor": text_color_parsed}
+        text_format["foregroundColor"] = text_color_parsed
         fields.append("userEnteredFormat.textFormat.foregroundColor")
+    if bold is not None:
+        text_format["bold"] = bold
+        fields.append("userEnteredFormat.textFormat.bold")
+    if italic is not None:
+        text_format["italic"] = italic
+        fields.append("userEnteredFormat.textFormat.italic")
+    if underline is not None:
+        text_format["underline"] = underline
+        fields.append("userEnteredFormat.textFormat.underline")
+    if strikethrough is not None:
+        text_format["strikethrough"] = strikethrough
+        fields.append("userEnteredFormat.textFormat.strikethrough")
+    if font_size is not None:
+        if font_size < 1:
+            raise UserInputError("font_size must be a positive integer.")
+        text_format["fontSize"] = font_size
+        fields.append("userEnteredFormat.textFormat.fontSize")
+    if font_family is not None:
+        text_format["fontFamily"] = font_family
+        fields.append("userEnteredFormat.textFormat.fontFamily")
+
+    if text_format:
+        user_entered_format["textFormat"] = text_format
+
     if number_format:
         user_entered_format["numberFormat"] = number_format
         fields.append("userEnteredFormat.numberFormat")
 
     if not user_entered_format:
         raise UserInputError(
-            "No formatting applied. Verify provided colors or number format."
+            "No formatting applied. Verify provided colors, font options, or number format."
         )
 
     request_body = {
@@ -485,7 +534,25 @@ async def format_sheet_range(
     if bg_color_parsed:
         applied_parts.append(f"background {background_color}")
     if text_color_parsed:
-        applied_parts.append(f"text {text_color}")
+        applied_parts.append(f"text color {text_color}")
+
+    # Summarize font formatting
+    font_parts = []
+    if bold is not None:
+        font_parts.append("bold" if bold else "not bold")
+    if italic is not None:
+        font_parts.append("italic" if italic else "not italic")
+    if underline is not None:
+        font_parts.append("underline" if underline else "no underline")
+    if strikethrough is not None:
+        font_parts.append("strikethrough" if strikethrough else "no strikethrough")
+    if font_size is not None:
+        font_parts.append(f"{font_size}pt")
+    if font_family is not None:
+        font_parts.append(f"font '{font_family}'")
+    if font_parts:
+        applied_parts.append(f"font: {', '.join(font_parts)}")
+
     if number_format:
         nf_desc = number_format["type"]
         if number_format_pattern:

@@ -7,29 +7,67 @@ the macOS Keychain, so they don't need to be in config files or environment
 variables.
 
 Usage:
-    python setup_keychain.py [--service SERVICE_NAME]
+    python3 setup_keychain.py [--service SERVICE_NAME]
 
 Examples:
     # Store credentials with default service name
-    python setup_keychain.py
+    python3 setup_keychain.py
 
     # Store credentials for a specific project
-    python setup_keychain.py --service google-mcp-sd-project
+    python3 setup_keychain.py --service google-mcp-sd-project
 
     # Delete stored credentials
-    python setup_keychain.py --delete
+    python3 setup_keychain.py --delete
 
     # Show stored credentials info (not the actual secrets)
-    python setup_keychain.py --show
+    python3 setup_keychain.py --show
 """
 
 import argparse
 import getpass
 import sys
 import os
+import json
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Key for storing OAuth client credentials in Keychain
+CLIENT_CREDENTIALS_KEY = "__oauth_client_credentials__"
+DEFAULT_SERVICE_NAME = "google-workspace-mcp"
+
+
+def get_client_credentials(keyring_module, service_name):
+    """Retrieve OAuth client credentials from Keychain."""
+    try:
+        data = keyring_module.get_password(service_name, CLIENT_CREDENTIALS_KEY)
+        if data:
+            creds = json.loads(data)
+            if creds.get("client_id") and creds.get("client_secret"):
+                return creds
+    except Exception:
+        pass
+    return None
+
+
+def store_client_credentials(keyring_module, service_name, client_id, client_secret):
+    """Store OAuth client credentials in Keychain."""
+    try:
+        data = json.dumps({
+            "client_id": client_id,
+            "client_secret": client_secret
+        })
+        keyring_module.set_password(service_name, CLIENT_CREDENTIALS_KEY, data)
+        return True
+    except Exception as e:
+        print(f"Error: {e}")
+        return False
+
+
+def delete_client_credentials(keyring_module, service_name):
+    """Delete OAuth client credentials from Keychain."""
+    try:
+        keyring_module.delete_password(service_name, CLIENT_CREDENTIALS_KEY)
+        return True
+    except Exception:
+        return True  # Already deleted or doesn't exist
 
 
 def main():
@@ -40,7 +78,7 @@ def main():
     )
     parser.add_argument(
         "--service",
-        default=os.getenv("GOOGLE_MCP_KEYCHAIN_SERVICE", "google-workspace-mcp"),
+        default=os.getenv("GOOGLE_MCP_KEYCHAIN_SERVICE", DEFAULT_SERVICE_NAME),
         help="Keychain service name for credential isolation (default: google-workspace-mcp)"
     )
     parser.add_argument(
@@ -64,12 +102,13 @@ def main():
 
     args = parser.parse_args()
 
+    # Import keyring
     try:
         import keyring
         import keyring.errors
     except ImportError:
         print("Error: keyring library not installed.")
-        print("Install with: pip install keyring")
+        print("Install with: python3 -m pip install keyring")
         sys.exit(1)
 
     # Check keyring backend
@@ -81,19 +120,13 @@ def main():
         print("On macOS, this should use the system Keychain automatically.")
         sys.exit(1)
 
-    from auth.keychain_credential_store import (
-        get_client_credentials_from_keychain,
-        store_client_credentials_in_keychain,
-        delete_client_credentials_from_keychain,
-    )
-
     service_name = args.service
     print(f"Service name: {service_name}")
     print()
 
     if args.show:
         # Show stored credentials info
-        creds = get_client_credentials_from_keychain(service_name)
+        creds = get_client_credentials(keyring, service_name)
         if creds:
             client_id = creds.get("client_id", "")
             # Mask most of the client ID for security
@@ -112,7 +145,7 @@ def main():
         # Delete stored credentials
         confirm = input(f"Delete credentials from Keychain service '{service_name}'? [y/N]: ")
         if confirm.lower() == 'y':
-            if delete_client_credentials_from_keychain(service_name):
+            if delete_client_credentials(keyring, service_name):
                 print("✓ Credentials deleted from Keychain")
             else:
                 print("✗ Failed to delete credentials")
@@ -127,7 +160,7 @@ def main():
     print()
 
     # Get existing credentials to show if updating
-    existing = get_client_credentials_from_keychain(service_name)
+    existing = get_client_credentials(keyring, service_name)
     if existing:
         print("⚠ Existing credentials found. They will be replaced.")
         print()
@@ -162,7 +195,7 @@ def main():
     print()
     print("Storing credentials in Keychain...")
 
-    if store_client_credentials_in_keychain(client_id, client_secret, service_name):
+    if store_client_credentials(keyring, service_name, client_id, client_secret):
         print()
         print("✓ Credentials stored successfully in macOS Keychain!")
         print()

@@ -237,16 +237,38 @@ def get_credential_store() -> CredentialStore:
     """
     Get the global credential store instance.
 
+    Backend selection via GOOGLE_MCP_CREDENTIAL_BACKEND environment variable:
+        - "keychain" -> KeychainCredentialStore (macOS Keychain, encrypted)
+        - "file" or unset -> LocalDirectoryCredentialStore (JSON files)
+
+    For Keychain backend, you can also set:
+        - GOOGLE_MCP_KEYCHAIN_SERVICE: Custom service name for project isolation
+
     Returns:
         Configured credential store instance
+
+    Raises:
+        ImportError: If keychain backend requested but keyring not installed
+        RuntimeError: If keychain backend requested but no working backend found
     """
     global _credential_store
 
     if _credential_store is None:
-        # always use LocalJsonCredentialStore as the default
-        # Future enhancement: support other backends via environment variables
-        _credential_store = LocalDirectoryCredentialStore()
-        logger.info(f"Initialized credential store: {type(_credential_store).__name__}")
+        backend = os.getenv("GOOGLE_MCP_CREDENTIAL_BACKEND", "file").lower().strip()
+
+        if backend == "keychain":
+            from .keychain_credential_store import KeychainCredentialStore
+            _credential_store = KeychainCredentialStore()
+            logger.info(
+                f"Initialized credential store: KeychainCredentialStore "
+                f"(service: {_credential_store.service_name})"
+            )
+        else:
+            _credential_store = LocalDirectoryCredentialStore()
+            logger.info(
+                f"Initialized credential store: LocalDirectoryCredentialStore "
+                f"(dir: {_credential_store.base_dir})"
+            )
 
     return _credential_store
 

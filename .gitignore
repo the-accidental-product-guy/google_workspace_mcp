@@ -20,8 +20,14 @@ venv/
 # ---- macOS clutter -----------------------------------------------------
 .DS_Store
 
-# ---- Secrets -----------------------------------------------------------
+# ---- Secrets & Credentials ---------------------------------------------
 client_secret.json
+client_secret*.json
+credentials.json
+token.json
+*.credentials.json
+.google_workspace_mcp/
+~/.google_workspace_mcp/
 
 # ---- Logs --------------------------------------------------------------
 mcp_server_debug.log

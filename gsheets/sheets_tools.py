@@ -383,6 +383,12 @@ async def format_sheet_range(
     strikethrough: Optional[bool] = None,
     font_size: Optional[int] = None,
     font_family: Optional[str] = None,
+    horizontal_alignment: Optional[str] = None,
+    vertical_alignment: Optional[str] = None,
+    wrap_strategy: Optional[str] = None,
+    border_style: Optional[str] = None,
+    border_color: Optional[str] = None,
+    border_sides: Optional[str] = None,
 ) -> str:
     """
     Applies formatting to a range: background/text color, font styling, and number/date formats.
@@ -406,6 +412,12 @@ async def format_sheet_range(
         strikethrough (Optional[bool]): Whether to strikethrough text.
         font_size (Optional[int]): Font size in points (e.g., 10, 12, 14).
         font_family (Optional[str]): Font family name (e.g., "Arial", "Times New Roman").
+        horizontal_alignment (Optional[str]): Horizontal alignment: LEFT, CENTER, RIGHT.
+        vertical_alignment (Optional[str]): Vertical alignment: TOP, MIDDLE, BOTTOM.
+        wrap_strategy (Optional[str]): Text wrap strategy: WRAP, OVERFLOW_CELL, CLIP.
+        border_style (Optional[str]): Border line style: SOLID, DASHED, DOTTED, DOUBLE, SOLID_MEDIUM, SOLID_THICK, NONE.
+        border_color (Optional[str]): Hex border color (e.g., "#000000"). Defaults to black.
+        border_sides (Optional[str]): Comma-separated sides to apply border: "top,bottom,left,right". Defaults to all sides.
 
     Returns:
         str: Confirmation of the applied formatting.
@@ -425,11 +437,17 @@ async def format_sheet_range(
         font_size is not None,
         font_family is not None,
     ])
-    if not any([background_color, text_color, number_format_type, has_font_formatting]):
+    has_alignment = horizontal_alignment is not None or vertical_alignment is not None
+    has_wrapping = wrap_strategy is not None
+    has_borders = border_style is not None
+
+    if not any([background_color, text_color, number_format_type, has_font_formatting,
+                has_alignment, has_wrapping, has_borders]):
         raise UserInputError(
             "Provide at least one formatting option: background_color, text_color, "
-            "number_format_type, or font styling (bold, italic, underline, strikethrough, "
-            "font_size, font_family)."
+            "number_format_type, font styling (bold, italic, underline, strikethrough, "
+            "font_size, font_family), alignment (horizontal_alignment, vertical_alignment), "
+            "wrap_strategy, or borders (border_style)."
         )
 
     bg_color_parsed = _parse_hex_color(background_color)
@@ -507,6 +525,76 @@ async def format_sheet_range(
         user_entered_format["numberFormat"] = number_format
         fields.append("userEnteredFormat.numberFormat")
 
+    # Handle horizontal alignment
+    if horizontal_alignment is not None:
+        allowed_h_align = {"LEFT", "CENTER", "RIGHT"}
+        normalized_h = horizontal_alignment.upper()
+        if normalized_h not in allowed_h_align:
+            raise UserInputError(
+                f"horizontal_alignment must be one of {sorted(allowed_h_align)}."
+            )
+        user_entered_format["horizontalAlignment"] = normalized_h
+        fields.append("userEnteredFormat.horizontalAlignment")
+
+    # Handle vertical alignment
+    if vertical_alignment is not None:
+        allowed_v_align = {"TOP", "MIDDLE", "BOTTOM"}
+        normalized_v = vertical_alignment.upper()
+        if normalized_v not in allowed_v_align:
+            raise UserInputError(
+                f"vertical_alignment must be one of {sorted(allowed_v_align)}."
+            )
+        user_entered_format["verticalAlignment"] = normalized_v
+        fields.append("userEnteredFormat.verticalAlignment")
+
+    # Handle text wrapping
+    if wrap_strategy is not None:
+        allowed_wrap = {"WRAP", "OVERFLOW_CELL", "CLIP"}
+        normalized_wrap = wrap_strategy.upper()
+        if normalized_wrap not in allowed_wrap:
+            raise UserInputError(
+                f"wrap_strategy must be one of {sorted(allowed_wrap)}."
+            )
+        user_entered_format["wrapStrategy"] = normalized_wrap
+        fields.append("userEnteredFormat.wrapStrategy")
+
+    # Handle borders
+    if border_style is not None:
+        allowed_border_styles = {
+            "SOLID", "DASHED", "DOTTED", "DOUBLE",
+            "SOLID_MEDIUM", "SOLID_THICK", "NONE"
+        }
+        normalized_border = border_style.upper()
+        if normalized_border not in allowed_border_styles:
+            raise UserInputError(
+                f"border_style must be one of {sorted(allowed_border_styles)}."
+            )
+
+        # Parse border color (default to black)
+        border_color_parsed = _parse_hex_color(border_color) if border_color else {
+            "red": 0, "green": 0, "blue": 0
+        }
+
+        # Determine which sides to apply borders
+        if border_sides:
+            sides = [s.strip().lower() for s in border_sides.split(",")]
+            allowed_sides = {"top", "bottom", "left", "right"}
+            invalid_sides = set(sides) - allowed_sides
+            if invalid_sides:
+                raise UserInputError(
+                    f"Invalid border_sides: {invalid_sides}. Must be: {sorted(allowed_sides)}."
+                )
+        else:
+            sides = ["top", "bottom", "left", "right"]
+
+        border_spec = {"style": normalized_border, "color": border_color_parsed}
+        borders = {}
+        for side in sides:
+            borders[side] = border_spec
+            fields.append(f"userEnteredFormat.borders.{side}")
+
+        user_entered_format["borders"] = borders
+
     if not user_entered_format:
         raise UserInputError(
             "No formatting applied. Verify provided colors, font options, or number format."
@@ -559,10 +647,233 @@ async def format_sheet_range(
             nf_desc += f" (pattern: {number_format_pattern})"
         applied_parts.append(f"format {nf_desc}")
 
+    # Summarize alignment
+    if horizontal_alignment:
+        applied_parts.append(f"h-align: {horizontal_alignment.upper()}")
+    if vertical_alignment:
+        applied_parts.append(f"v-align: {vertical_alignment.upper()}")
+
+    # Summarize wrapping
+    if wrap_strategy:
+        applied_parts.append(f"wrap: {wrap_strategy.upper()}")
+
+    # Summarize borders
+    if border_style:
+        border_desc = border_style.upper()
+        if border_color:
+            border_desc += f" {border_color}"
+        if border_sides:
+            border_desc += f" ({border_sides})"
+        else:
+            border_desc += " (all sides)"
+        applied_parts.append(f"borders: {border_desc}")
+
     summary = ", ".join(applied_parts)
     return (
         f"Applied formatting to range '{range_name}' in spreadsheet {spreadsheet_id} "
         f"for {user_google_email}: {summary}."
+    )
+
+
+@server.tool()
+@handle_http_errors("merge_cells", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def merge_cells(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    range_name: str,
+    merge_type: Optional[str] = None,
+    unmerge: bool = False,
+) -> str:
+    """
+    Merges or unmerges cells in a range.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        spreadsheet_id (str): The ID of the spreadsheet. Required.
+        range_name (str): A1-style range to merge/unmerge (e.g., "A1:C3" or "Sheet1!A1:C3").
+        merge_type (Optional[str]): How to merge: MERGE_ALL (single cell), MERGE_COLUMNS (merge each column), MERGE_ROWS (merge each row). Defaults to MERGE_ALL.
+        unmerge (bool): If True, unmerges cells in the range instead of merging.
+
+    Returns:
+        str: Confirmation of the merge/unmerge operation.
+    """
+    logger.info(
+        "[merge_cells] Invoked. Email: '%s', Spreadsheet: %s, Range: %s, Unmerge: %s",
+        user_google_email,
+        spreadsheet_id,
+        range_name,
+        unmerge,
+    )
+
+    # Get sheet metadata for parsing range
+    metadata = await asyncio.to_thread(
+        service.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(sheetId,title))",
+        )
+        .execute
+    )
+    sheets = metadata.get("sheets", [])
+    grid_range = _parse_a1_range(range_name, sheets)
+
+    if unmerge:
+        request_body = {
+            "requests": [{"unmergeCells": {"range": grid_range}}]
+        }
+        action = "Unmerged"
+    else:
+        # Validate merge_type
+        allowed_merge_types = {"MERGE_ALL", "MERGE_COLUMNS", "MERGE_ROWS"}
+        if merge_type is None:
+            merge_type = "MERGE_ALL"
+        else:
+            merge_type = merge_type.upper()
+            if merge_type not in allowed_merge_types:
+                raise UserInputError(
+                    f"merge_type must be one of {sorted(allowed_merge_types)}."
+                )
+
+        request_body = {
+            "requests": [
+                {
+                    "mergeCells": {
+                        "range": grid_range,
+                        "mergeType": merge_type,
+                    }
+                }
+            ]
+        }
+        action = f"Merged ({merge_type})"
+
+    await asyncio.to_thread(
+        service.spreadsheets()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
+        .execute
+    )
+
+    return (
+        f"{action} cells in range '{range_name}' in spreadsheet {spreadsheet_id} "
+        f"for {user_google_email}."
+    )
+
+
+@server.tool()
+@handle_http_errors("resize_dimensions", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def resize_dimensions(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    dimension: str,
+    start_index: int,
+    end_index: int,
+    pixel_size: int,
+    sheet_name: Optional[str] = None,
+) -> str:
+    """
+    Sets the height of rows or width of columns in a sheet.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        spreadsheet_id (str): The ID of the spreadsheet. Required.
+        dimension (str): Which dimension to resize: ROWS (for row height) or COLUMNS (for column width).
+        start_index (int): Starting row/column index (0-based). Row 1 = index 0, Column A = index 0.
+        end_index (int): Ending row/column index (exclusive). To resize row 1 only: start=0, end=1.
+        pixel_size (int): Size in pixels. Typical row height: 21. Typical column width: 100.
+        sheet_name (Optional[str]): Name of the sheet. Defaults to first sheet if not specified.
+
+    Returns:
+        str: Confirmation of the resize operation.
+    """
+    logger.info(
+        "[resize_dimensions] Invoked. Email: '%s', Spreadsheet: %s, Dimension: %s, "
+        "Range: %d-%d, Size: %d px",
+        user_google_email,
+        spreadsheet_id,
+        dimension,
+        start_index,
+        end_index,
+        pixel_size,
+    )
+
+    # Validate dimension
+    allowed_dimensions = {"ROWS", "COLUMNS"}
+    normalized_dimension = dimension.upper()
+    if normalized_dimension not in allowed_dimensions:
+        raise UserInputError(
+            f"dimension must be one of {sorted(allowed_dimensions)}."
+        )
+
+    # Validate indices
+    if start_index < 0:
+        raise UserInputError("start_index must be a non-negative integer.")
+    if end_index <= start_index:
+        raise UserInputError("end_index must be greater than start_index.")
+    if pixel_size < 1:
+        raise UserInputError("pixel_size must be a positive integer.")
+
+    # Get sheet metadata
+    metadata = await asyncio.to_thread(
+        service.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(sheetId,title))",
+        )
+        .execute
+    )
+    sheets = metadata.get("sheets", [])
+
+    # Find the sheet ID
+    sheet_id = None
+    if sheet_name:
+        for sheet in sheets:
+            props = sheet.get("properties", {})
+            if props.get("title") == sheet_name:
+                sheet_id = props.get("sheetId")
+                break
+        if sheet_id is None:
+            raise UserInputError(f"Sheet '{sheet_name}' not found in spreadsheet.")
+    else:
+        # Use first sheet
+        if sheets:
+            sheet_id = sheets[0].get("properties", {}).get("sheetId", 0)
+        else:
+            sheet_id = 0
+
+    request_body = {
+        "requests": [
+            {
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": normalized_dimension,
+                        "startIndex": start_index,
+                        "endIndex": end_index,
+                    },
+                    "properties": {"pixelSize": pixel_size},
+                    "fields": "pixelSize",
+                }
+            }
+        ]
+    }
+
+    await asyncio.to_thread(
+        service.spreadsheets()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
+        .execute
+    )
+
+    dim_label = "rows" if normalized_dimension == "ROWS" else "columns"
+    count = end_index - start_index
+    sheet_desc = f"sheet '{sheet_name}'" if sheet_name else "first sheet"
+
+    return (
+        f"Resized {count} {dim_label} (index {start_index} to {end_index - 1}) "
+        f"to {pixel_size}px in {sheet_desc} of spreadsheet {spreadsheet_id} "
+        f"for {user_google_email}."
     )
 
 

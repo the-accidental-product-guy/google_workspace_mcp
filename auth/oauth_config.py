@@ -31,9 +31,8 @@ class OAuthConfig:
         # External URL for reverse proxy scenarios
         self.external_url = os.getenv("WORKSPACE_EXTERNAL_URL")
 
-        # OAuth client configuration
-        self.client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
-        self.client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
+        # OAuth client configuration - try Keychain first, then env vars
+        self.client_id, self.client_secret = self._load_client_credentials()
 
         # OAuth 2.1 configuration
         self.oauth21_enabled = (
@@ -71,6 +70,40 @@ class OAuthConfig:
 
         # Ensure FastMCP's Google provider picks up our existing configuration
         self._apply_fastmcp_google_env()
+
+    def _load_client_credentials(self) -> tuple:
+        """
+        Load OAuth client credentials from Keychain or environment variables.
+
+        Priority:
+            1. Keychain (if GOOGLE_MCP_CREDENTIAL_BACKEND=keychain)
+            2. Environment variables (GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET)
+
+        Returns:
+            Tuple of (client_id, client_secret)
+        """
+        client_id = None
+        client_secret = None
+
+        # Try Keychain first if keychain backend is enabled
+        backend = os.getenv("GOOGLE_MCP_CREDENTIAL_BACKEND", "").lower().strip()
+        if backend == "keychain":
+            try:
+                from auth.keychain_credential_store import get_client_credentials_from_keychain
+                creds = get_client_credentials_from_keychain()
+                if creds:
+                    client_id = creds.get("client_id")
+                    client_secret = creds.get("client_secret")
+            except ImportError:
+                pass  # Keychain module not available, fall through to env vars
+
+        # Fall back to environment variables
+        if not client_id:
+            client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
+        if not client_secret:
+            client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
+
+        return client_id, client_secret
 
     def _get_redirect_uri(self) -> str:
         """

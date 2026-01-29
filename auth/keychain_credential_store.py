@@ -16,7 +16,7 @@ For multi-project isolation, use different service names per project:
 import os
 import json
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime
 from google.oauth2.credentials import Credentials
 
@@ -35,6 +35,109 @@ except ImportError:
 
 # Default service name - can be overridden per project
 DEFAULT_SERVICE_NAME = "google-workspace-mcp"
+
+
+# Keys for storing OAuth client credentials
+CLIENT_CREDENTIALS_KEY = "__oauth_client_credentials__"
+
+
+def get_client_credentials_from_keychain(
+    service_name: Optional[str] = None
+) -> Optional[Dict[str, str]]:
+    """
+    Retrieve OAuth client credentials from Keychain.
+
+    This is a standalone function that can be called before the full
+    credential store is initialized (e.g., during OAuthConfig setup).
+
+    Args:
+        service_name: Keychain service identifier. If None, uses:
+            1. GOOGLE_MCP_KEYCHAIN_SERVICE env var
+            2. DEFAULT_SERVICE_NAME
+
+    Returns:
+        Dict with 'client_id' and 'client_secret', or None if not found
+    """
+    if not KEYRING_AVAILABLE:
+        return None
+
+    if service_name is None:
+        service_name = os.getenv("GOOGLE_MCP_KEYCHAIN_SERVICE", DEFAULT_SERVICE_NAME)
+
+    try:
+        data = keyring.get_password(service_name, CLIENT_CREDENTIALS_KEY)
+        if data:
+            creds = json.loads(data)
+            if creds.get("client_id") and creds.get("client_secret"):
+                logger.debug(f"Loaded client credentials from Keychain (service: {service_name})")
+                return creds
+    except Exception as e:
+        logger.debug(f"Could not load client credentials from Keychain: {e}")
+
+    return None
+
+
+def store_client_credentials_in_keychain(
+    client_id: str,
+    client_secret: str,
+    service_name: Optional[str] = None
+) -> bool:
+    """
+    Store OAuth client credentials in Keychain.
+
+    Args:
+        client_id: Google OAuth Client ID
+        client_secret: Google OAuth Client Secret
+        service_name: Keychain service identifier
+
+    Returns:
+        True if successfully stored, False otherwise
+    """
+    if not KEYRING_AVAILABLE:
+        logger.error("keyring library not available")
+        return False
+
+    if service_name is None:
+        service_name = os.getenv("GOOGLE_MCP_KEYCHAIN_SERVICE", DEFAULT_SERVICE_NAME)
+
+    try:
+        data = json.dumps({
+            "client_id": client_id,
+            "client_secret": client_secret
+        })
+        keyring.set_password(service_name, CLIENT_CREDENTIALS_KEY, data)
+        logger.info(f"Stored client credentials in Keychain (service: {service_name})")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to store client credentials: {e}")
+        return False
+
+
+def delete_client_credentials_from_keychain(service_name: Optional[str] = None) -> bool:
+    """
+    Delete OAuth client credentials from Keychain.
+
+    Args:
+        service_name: Keychain service identifier
+
+    Returns:
+        True if successfully deleted, False otherwise
+    """
+    if not KEYRING_AVAILABLE:
+        return False
+
+    if service_name is None:
+        service_name = os.getenv("GOOGLE_MCP_KEYCHAIN_SERVICE", DEFAULT_SERVICE_NAME)
+
+    try:
+        keyring.delete_password(service_name, CLIENT_CREDENTIALS_KEY)
+        logger.info(f"Deleted client credentials from Keychain (service: {service_name})")
+        return True
+    except keyring.errors.PasswordDeleteError:
+        return True  # Already deleted
+    except Exception as e:
+        logger.error(f"Failed to delete client credentials: {e}")
+        return False
 
 
 class KeychainCredentialStore(CredentialStore):

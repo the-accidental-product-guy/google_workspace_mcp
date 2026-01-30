@@ -1,0 +1,944 @@
+"""
+Google Sheets Formatting Tools
+
+This module provides MCP tools for formatting operations:
+cell formatting, merge cells, resize dimensions, and conditional formatting.
+"""
+
+import logging
+import asyncio
+import copy
+from typing import List, Optional, Union
+
+from auth.service_decorator import require_google_service
+from core.server import server
+from core.utils import handle_http_errors, UserInputError
+from gsheets.sheets_helpers import (
+    CONDITION_TYPES,
+    _build_boolean_rule,
+    _build_gradient_rule,
+    _fetch_sheets_with_rules,
+    _format_conditional_rules_section,
+    _parse_a1_range,
+    _parse_condition_values,
+    _parse_gradient_points,
+    _parse_hex_color,
+    _select_sheet,
+)
+
+# Configure module logger
+logger = logging.getLogger(__name__)
+
+
+@server.tool()
+@handle_http_errors("format_sheet_range", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def format_sheet_range(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    range_name: str,
+    background_color: Optional[str] = None,
+    text_color: Optional[str] = None,
+    number_format_type: Optional[str] = None,
+    number_format_pattern: Optional[str] = None,
+    bold: Optional[bool] = None,
+    italic: Optional[bool] = None,
+    underline: Optional[bool] = None,
+    strikethrough: Optional[bool] = None,
+    font_size: Optional[int] = None,
+    font_family: Optional[str] = None,
+    horizontal_alignment: Optional[str] = None,
+    vertical_alignment: Optional[str] = None,
+    wrap_strategy: Optional[str] = None,
+    border_style: Optional[str] = None,
+    border_color: Optional[str] = None,
+    border_sides: Optional[str] = None,
+) -> str:
+    """
+    Applies formatting to a range: background/text color, font styling, and number/date formats.
+
+    Colors accept hex strings (#RRGGBB). Number formats follow Sheets types
+    (e.g., NUMBER, NUMBER_WITH_GROUPING, CURRENCY, DATE, TIME, DATE_TIME,
+    PERCENT, TEXT, SCIENTIFIC). If no sheet name is provided, the first sheet
+    is used.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        spreadsheet_id (str): The ID of the spreadsheet. Required.
+        range_name (str): A1-style range (optionally with sheet name). Required.
+        background_color (Optional[str]): Hex background color (e.g., "#FFEECC").
+        text_color (Optional[str]): Hex text color (e.g., "#000000").
+        number_format_type (Optional[str]): Sheets number format type (e.g., "DATE").
+        number_format_pattern (Optional[str]): Optional custom pattern for the number format.
+        bold (Optional[bool]): Whether to make text bold.
+        italic (Optional[bool]): Whether to make text italic.
+        underline (Optional[bool]): Whether to underline text.
+        strikethrough (Optional[bool]): Whether to strikethrough text.
+        font_size (Optional[int]): Font size in points (e.g., 10, 12, 14).
+        font_family (Optional[str]): Font family name (e.g., "Arial", "Times New Roman").
+        horizontal_alignment (Optional[str]): Horizontal alignment: LEFT, CENTER, RIGHT.
+        vertical_alignment (Optional[str]): Vertical alignment: TOP, MIDDLE, BOTTOM.
+        wrap_strategy (Optional[str]): Text wrap strategy: WRAP, OVERFLOW_CELL, CLIP.
+        border_style (Optional[str]): Border line style: SOLID, DASHED, DOTTED, DOUBLE, SOLID_MEDIUM, SOLID_THICK, NONE.
+        border_color (Optional[str]): Hex border color (e.g., "#000000"). Defaults to black.
+        border_sides (Optional[str]): Comma-separated sides to apply border: "top,bottom,left,right". Defaults to all sides.
+
+    Returns:
+        str: Confirmation of the applied formatting.
+    """
+    logger.info(
+        "[format_sheet_range] Invoked. Email: '%s', Spreadsheet: %s, Range: %s",
+        user_google_email,
+        spreadsheet_id,
+        range_name,
+    )
+
+    has_font_formatting = any([
+        bold is not None,
+        italic is not None,
+        underline is not None,
+        strikethrough is not None,
+        font_size is not None,
+        font_family is not None,
+    ])
+    has_alignment = horizontal_alignment is not None or vertical_alignment is not None
+    has_wrapping = wrap_strategy is not None
+    has_borders = border_style is not None
+
+    if not any([background_color, text_color, number_format_type, has_font_formatting,
+                has_alignment, has_wrapping, has_borders]):
+        raise UserInputError(
+            "Provide at least one formatting option: background_color, text_color, "
+            "number_format_type, font styling (bold, italic, underline, strikethrough, "
+            "font_size, font_family), alignment (horizontal_alignment, vertical_alignment), "
+            "wrap_strategy, or borders (border_style)."
+        )
+
+    bg_color_parsed = _parse_hex_color(background_color)
+    text_color_parsed = _parse_hex_color(text_color)
+
+    number_format = None
+    if number_format_type:
+        allowed_number_formats = {
+            "NUMBER",
+            "NUMBER_WITH_GROUPING",
+            "CURRENCY",
+            "PERCENT",
+            "SCIENTIFIC",
+            "DATE",
+            "TIME",
+            "DATE_TIME",
+            "TEXT",
+        }
+        normalized_type = number_format_type.upper()
+        if normalized_type not in allowed_number_formats:
+            raise UserInputError(
+                f"number_format_type must be one of {sorted(allowed_number_formats)}."
+            )
+        number_format = {"type": normalized_type}
+        if number_format_pattern:
+            number_format["pattern"] = number_format_pattern
+
+    metadata = await asyncio.to_thread(
+        service.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(sheetId,title))",
+        )
+        .execute
+    )
+    sheets = metadata.get("sheets", [])
+    grid_range = _parse_a1_range(range_name, sheets)
+
+    user_entered_format = {}
+    fields = []
+    if bg_color_parsed:
+        user_entered_format["backgroundColor"] = bg_color_parsed
+        fields.append("userEnteredFormat.backgroundColor")
+
+    # Build textFormat with all font properties
+    text_format = {}
+    if text_color_parsed:
+        text_format["foregroundColor"] = text_color_parsed
+        fields.append("userEnteredFormat.textFormat.foregroundColor")
+    if bold is not None:
+        text_format["bold"] = bold
+        fields.append("userEnteredFormat.textFormat.bold")
+    if italic is not None:
+        text_format["italic"] = italic
+        fields.append("userEnteredFormat.textFormat.italic")
+    if underline is not None:
+        text_format["underline"] = underline
+        fields.append("userEnteredFormat.textFormat.underline")
+    if strikethrough is not None:
+        text_format["strikethrough"] = strikethrough
+        fields.append("userEnteredFormat.textFormat.strikethrough")
+    if font_size is not None:
+        if font_size < 1:
+            raise UserInputError("font_size must be a positive integer.")
+        text_format["fontSize"] = font_size
+        fields.append("userEnteredFormat.textFormat.fontSize")
+    if font_family is not None:
+        text_format["fontFamily"] = font_family
+        fields.append("userEnteredFormat.textFormat.fontFamily")
+
+    if text_format:
+        user_entered_format["textFormat"] = text_format
+
+    if number_format:
+        user_entered_format["numberFormat"] = number_format
+        fields.append("userEnteredFormat.numberFormat")
+
+    # Handle horizontal alignment
+    if horizontal_alignment is not None:
+        allowed_h_align = {"LEFT", "CENTER", "RIGHT"}
+        normalized_h = horizontal_alignment.upper()
+        if normalized_h not in allowed_h_align:
+            raise UserInputError(
+                f"horizontal_alignment must be one of {sorted(allowed_h_align)}."
+            )
+        user_entered_format["horizontalAlignment"] = normalized_h
+        fields.append("userEnteredFormat.horizontalAlignment")
+
+    # Handle vertical alignment
+    if vertical_alignment is not None:
+        allowed_v_align = {"TOP", "MIDDLE", "BOTTOM"}
+        normalized_v = vertical_alignment.upper()
+        if normalized_v not in allowed_v_align:
+            raise UserInputError(
+                f"vertical_alignment must be one of {sorted(allowed_v_align)}."
+            )
+        user_entered_format["verticalAlignment"] = normalized_v
+        fields.append("userEnteredFormat.verticalAlignment")
+
+    # Handle text wrapping
+    if wrap_strategy is not None:
+        allowed_wrap = {"WRAP", "OVERFLOW_CELL", "CLIP"}
+        normalized_wrap = wrap_strategy.upper()
+        if normalized_wrap not in allowed_wrap:
+            raise UserInputError(
+                f"wrap_strategy must be one of {sorted(allowed_wrap)}."
+            )
+        user_entered_format["wrapStrategy"] = normalized_wrap
+        fields.append("userEnteredFormat.wrapStrategy")
+
+    # Handle borders
+    if border_style is not None:
+        allowed_border_styles = {
+            "SOLID", "DASHED", "DOTTED", "DOUBLE",
+            "SOLID_MEDIUM", "SOLID_THICK", "NONE"
+        }
+        normalized_border = border_style.upper()
+        if normalized_border not in allowed_border_styles:
+            raise UserInputError(
+                f"border_style must be one of {sorted(allowed_border_styles)}."
+            )
+
+        # Parse border color (default to black)
+        border_color_parsed = _parse_hex_color(border_color) if border_color else {
+            "red": 0, "green": 0, "blue": 0
+        }
+
+        # Determine which sides to apply borders
+        if border_sides:
+            sides = [s.strip().lower() for s in border_sides.split(",")]
+            allowed_sides = {"top", "bottom", "left", "right"}
+            invalid_sides = set(sides) - allowed_sides
+            if invalid_sides:
+                raise UserInputError(
+                    f"Invalid border_sides: {invalid_sides}. Must be: {sorted(allowed_sides)}."
+                )
+        else:
+            sides = ["top", "bottom", "left", "right"]
+
+        border_spec = {"style": normalized_border, "color": border_color_parsed}
+        borders = {}
+        for side in sides:
+            borders[side] = border_spec
+            fields.append(f"userEnteredFormat.borders.{side}")
+
+        user_entered_format["borders"] = borders
+
+    if not user_entered_format:
+        raise UserInputError(
+            "No formatting applied. Verify provided colors, font options, or number format."
+        )
+
+    request_body = {
+        "requests": [
+            {
+                "repeatCell": {
+                    "range": grid_range,
+                    "cell": {"userEnteredFormat": user_entered_format},
+                    "fields": ",".join(fields),
+                }
+            }
+        ]
+    }
+
+    await asyncio.to_thread(
+        service.spreadsheets()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
+        .execute
+    )
+
+    applied_parts = []
+    if bg_color_parsed:
+        applied_parts.append(f"background {background_color}")
+    if text_color_parsed:
+        applied_parts.append(f"text color {text_color}")
+
+    # Summarize font formatting
+    font_parts = []
+    if bold is not None:
+        font_parts.append("bold" if bold else "not bold")
+    if italic is not None:
+        font_parts.append("italic" if italic else "not italic")
+    if underline is not None:
+        font_parts.append("underline" if underline else "no underline")
+    if strikethrough is not None:
+        font_parts.append("strikethrough" if strikethrough else "no strikethrough")
+    if font_size is not None:
+        font_parts.append(f"{font_size}pt")
+    if font_family is not None:
+        font_parts.append(f"font '{font_family}'")
+    if font_parts:
+        applied_parts.append(f"font: {', '.join(font_parts)}")
+
+    if number_format:
+        nf_desc = number_format["type"]
+        if number_format_pattern:
+            nf_desc += f" (pattern: {number_format_pattern})"
+        applied_parts.append(f"format {nf_desc}")
+
+    # Summarize alignment
+    if horizontal_alignment:
+        applied_parts.append(f"h-align: {horizontal_alignment.upper()}")
+    if vertical_alignment:
+        applied_parts.append(f"v-align: {vertical_alignment.upper()}")
+
+    # Summarize wrapping
+    if wrap_strategy:
+        applied_parts.append(f"wrap: {wrap_strategy.upper()}")
+
+    # Summarize borders
+    if border_style:
+        border_desc = border_style.upper()
+        if border_color:
+            border_desc += f" {border_color}"
+        if border_sides:
+            border_desc += f" ({border_sides})"
+        else:
+            border_desc += " (all sides)"
+        applied_parts.append(f"borders: {border_desc}")
+
+    summary = ", ".join(applied_parts)
+    return (
+        f"Applied formatting to range '{range_name}' in spreadsheet {spreadsheet_id} "
+        f"for {user_google_email}: {summary}."
+    )
+
+
+@server.tool()
+@handle_http_errors("merge_cells", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def merge_cells(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    range_name: str,
+    merge_type: Optional[str] = None,
+    unmerge: bool = False,
+) -> str:
+    """
+    Merges or unmerges cells in a range.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        spreadsheet_id (str): The ID of the spreadsheet. Required.
+        range_name (str): A1-style range to merge/unmerge (e.g., "A1:C3" or "Sheet1!A1:C3").
+        merge_type (Optional[str]): How to merge: MERGE_ALL (single cell), MERGE_COLUMNS (merge each column), MERGE_ROWS (merge each row). Defaults to MERGE_ALL.
+        unmerge (bool): If True, unmerges cells in the range instead of merging.
+
+    Returns:
+        str: Confirmation of the merge/unmerge operation.
+    """
+    logger.info(
+        "[merge_cells] Invoked. Email: '%s', Spreadsheet: %s, Range: %s, Unmerge: %s",
+        user_google_email,
+        spreadsheet_id,
+        range_name,
+        unmerge,
+    )
+
+    # Get sheet metadata for parsing range
+    metadata = await asyncio.to_thread(
+        service.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(sheetId,title))",
+        )
+        .execute
+    )
+    sheets = metadata.get("sheets", [])
+    grid_range = _parse_a1_range(range_name, sheets)
+
+    if unmerge:
+        request_body = {
+            "requests": [{"unmergeCells": {"range": grid_range}}]
+        }
+        action = "Unmerged"
+    else:
+        # Validate merge_type
+        allowed_merge_types = {"MERGE_ALL", "MERGE_COLUMNS", "MERGE_ROWS"}
+        if merge_type is None:
+            merge_type = "MERGE_ALL"
+        else:
+            merge_type = merge_type.upper()
+            if merge_type not in allowed_merge_types:
+                raise UserInputError(
+                    f"merge_type must be one of {sorted(allowed_merge_types)}."
+                )
+
+        request_body = {
+            "requests": [
+                {
+                    "mergeCells": {
+                        "range": grid_range,
+                        "mergeType": merge_type,
+                    }
+                }
+            ]
+        }
+        action = f"Merged ({merge_type})"
+
+    await asyncio.to_thread(
+        service.spreadsheets()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
+        .execute
+    )
+
+    return (
+        f"{action} cells in range '{range_name}' in spreadsheet {spreadsheet_id} "
+        f"for {user_google_email}."
+    )
+
+
+@server.tool()
+@handle_http_errors("resize_dimensions", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def resize_dimensions(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    dimension: str,
+    start_index: int,
+    end_index: int,
+    pixel_size: int,
+    sheet_name: Optional[str] = None,
+) -> str:
+    """
+    Sets the height of rows or width of columns in a sheet.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        spreadsheet_id (str): The ID of the spreadsheet. Required.
+        dimension (str): Which dimension to resize: ROWS (for row height) or COLUMNS (for column width).
+        start_index (int): Starting row/column index (0-based). Row 1 = index 0, Column A = index 0.
+        end_index (int): Ending row/column index (exclusive). To resize row 1 only: start=0, end=1.
+        pixel_size (int): Size in pixels. Typical row height: 21. Typical column width: 100.
+        sheet_name (Optional[str]): Name of the sheet. Defaults to first sheet if not specified.
+
+    Returns:
+        str: Confirmation of the resize operation.
+    """
+    logger.info(
+        "[resize_dimensions] Invoked. Email: '%s', Spreadsheet: %s, Dimension: %s, "
+        "Range: %d-%d, Size: %d px",
+        user_google_email,
+        spreadsheet_id,
+        dimension,
+        start_index,
+        end_index,
+        pixel_size,
+    )
+
+    # Validate dimension
+    allowed_dimensions = {"ROWS", "COLUMNS"}
+    normalized_dimension = dimension.upper()
+    if normalized_dimension not in allowed_dimensions:
+        raise UserInputError(
+            f"dimension must be one of {sorted(allowed_dimensions)}."
+        )
+
+    # Validate indices
+    if start_index < 0:
+        raise UserInputError("start_index must be a non-negative integer.")
+    if end_index <= start_index:
+        raise UserInputError("end_index must be greater than start_index.")
+    if pixel_size < 1:
+        raise UserInputError("pixel_size must be a positive integer.")
+
+    # Get sheet metadata
+    metadata = await asyncio.to_thread(
+        service.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(sheetId,title))",
+        )
+        .execute
+    )
+    sheets = metadata.get("sheets", [])
+
+    # Find the sheet ID
+    sheet_id = None
+    if sheet_name:
+        for sheet in sheets:
+            props = sheet.get("properties", {})
+            if props.get("title") == sheet_name:
+                sheet_id = props.get("sheetId")
+                break
+        if sheet_id is None:
+            raise UserInputError(f"Sheet '{sheet_name}' not found in spreadsheet.")
+    else:
+        # Use first sheet
+        if sheets:
+            sheet_id = sheets[0].get("properties", {}).get("sheetId", 0)
+        else:
+            sheet_id = 0
+
+    request_body = {
+        "requests": [
+            {
+                "updateDimensionProperties": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": normalized_dimension,
+                        "startIndex": start_index,
+                        "endIndex": end_index,
+                    },
+                    "properties": {"pixelSize": pixel_size},
+                    "fields": "pixelSize",
+                }
+            }
+        ]
+    }
+
+    await asyncio.to_thread(
+        service.spreadsheets()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
+        .execute
+    )
+
+    dim_label = "rows" if normalized_dimension == "ROWS" else "columns"
+    count = end_index - start_index
+    sheet_desc = f"sheet '{sheet_name}'" if sheet_name else "first sheet"
+
+    return (
+        f"Resized {count} {dim_label} (index {start_index} to {end_index - 1}) "
+        f"to {pixel_size}px in {sheet_desc} of spreadsheet {spreadsheet_id} "
+        f"for {user_google_email}."
+    )
+
+
+@server.tool()
+@handle_http_errors("add_conditional_formatting", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def add_conditional_formatting(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    range_name: str,
+    condition_type: str,
+    condition_values: Optional[Union[str, List[Union[str, int, float]]]] = None,
+    background_color: Optional[str] = None,
+    text_color: Optional[str] = None,
+    rule_index: Optional[int] = None,
+    gradient_points: Optional[Union[str, List[dict]]] = None,
+) -> str:
+    """
+    Adds a conditional formatting rule to a range.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        spreadsheet_id (str): The ID of the spreadsheet. Required.
+        range_name (str): A1-style range (optionally with sheet name). Required.
+        condition_type (str): Sheets condition type (e.g., NUMBER_GREATER, TEXT_CONTAINS, DATE_BEFORE, CUSTOM_FORMULA).
+        condition_values (Optional[Union[str, List[Union[str, int, float]]]]): Values for the condition; accepts a list or a JSON string representing a list. Depends on condition_type.
+        background_color (Optional[str]): Hex background color to apply when condition matches.
+        text_color (Optional[str]): Hex text color to apply when condition matches.
+        rule_index (Optional[int]): Optional position to insert the rule (0-based) within the sheet's rules.
+        gradient_points (Optional[Union[str, List[dict]]]): List (or JSON list) of gradient points for a color scale. If provided, a gradient rule is created and boolean parameters are ignored.
+
+    Returns:
+        str: Confirmation of the added rule.
+    """
+    logger.info(
+        "[add_conditional_formatting] Invoked. Email: '%s', Spreadsheet: %s, Range: %s, Type: %s, Values: %s",
+        user_google_email,
+        spreadsheet_id,
+        range_name,
+        condition_type,
+        condition_values,
+    )
+
+    if rule_index is not None and (not isinstance(rule_index, int) or rule_index < 0):
+        raise UserInputError("rule_index must be a non-negative integer when provided.")
+
+    condition_values_list = _parse_condition_values(condition_values)
+    gradient_points_list = _parse_gradient_points(gradient_points)
+
+    sheets, sheet_titles = await _fetch_sheets_with_rules(service, spreadsheet_id)
+    grid_range = _parse_a1_range(range_name, sheets)
+
+    target_sheet = None
+    for sheet in sheets:
+        if sheet.get("properties", {}).get("sheetId") == grid_range.get("sheetId"):
+            target_sheet = sheet
+            break
+    if target_sheet is None:
+        raise UserInputError(
+            "Target sheet not found while adding conditional formatting."
+        )
+
+    current_rules = target_sheet.get("conditionalFormats", []) or []
+
+    insert_at = rule_index if rule_index is not None else len(current_rules)
+    if insert_at > len(current_rules):
+        raise UserInputError(
+            f"rule_index {insert_at} is out of range for sheet '{target_sheet.get('properties', {}).get('title', 'Unknown')}' "
+            f"(current count: {len(current_rules)})."
+        )
+
+    if gradient_points_list:
+        new_rule = _build_gradient_rule([grid_range], gradient_points_list)
+        rule_desc = "gradient"
+        values_desc = ""
+        applied_parts = [f"gradient points {len(gradient_points_list)}"]
+    else:
+        rule, cond_type_normalized = _build_boolean_rule(
+            [grid_range],
+            condition_type,
+            condition_values_list,
+            background_color,
+            text_color,
+        )
+        new_rule = rule
+        rule_desc = cond_type_normalized
+        values_desc = ""
+        if condition_values_list:
+            values_desc = f" with values {condition_values_list}"
+        applied_parts = []
+        if background_color:
+            applied_parts.append(f"background {background_color}")
+        if text_color:
+            applied_parts.append(f"text {text_color}")
+
+    new_rules_state = copy.deepcopy(current_rules)
+    new_rules_state.insert(insert_at, new_rule)
+
+    add_rule_request = {"rule": new_rule}
+    if rule_index is not None:
+        add_rule_request["index"] = rule_index
+
+    request_body = {"requests": [{"addConditionalFormatRule": add_rule_request}]}
+
+    await asyncio.to_thread(
+        service.spreadsheets()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
+        .execute
+    )
+
+    format_desc = ", ".join(applied_parts) if applied_parts else "format applied"
+
+    sheet_title = target_sheet.get("properties", {}).get("title", "Unknown")
+    state_text = _format_conditional_rules_section(
+        sheet_title, new_rules_state, sheet_titles, indent=""
+    )
+
+    return "\n".join(
+        [
+            f"Added conditional format on '{range_name}' in spreadsheet {spreadsheet_id} "
+            f"for {user_google_email}: {rule_desc}{values_desc}; format: {format_desc}.",
+            state_text,
+        ]
+    )
+
+
+@server.tool()
+@handle_http_errors("update_conditional_formatting", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def update_conditional_formatting(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    rule_index: int,
+    range_name: Optional[str] = None,
+    condition_type: Optional[str] = None,
+    condition_values: Optional[Union[str, List[Union[str, int, float]]]] = None,
+    background_color: Optional[str] = None,
+    text_color: Optional[str] = None,
+    sheet_name: Optional[str] = None,
+    gradient_points: Optional[Union[str, List[dict]]] = None,
+) -> str:
+    """
+    Updates an existing conditional formatting rule by index on a sheet.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        spreadsheet_id (str): The ID of the spreadsheet. Required.
+        range_name (Optional[str]): A1-style range to apply the updated rule (optionally with sheet name). If omitted, existing ranges are preserved.
+        rule_index (int): Index of the rule to update (0-based).
+        condition_type (Optional[str]): Sheets condition type. If omitted, the existing rule's type is preserved.
+        condition_values (Optional[Union[str, List[Union[str, int, float]]]]): Values for the condition.
+        background_color (Optional[str]): Hex background color when condition matches.
+        text_color (Optional[str]): Hex text color when condition matches.
+        sheet_name (Optional[str]): Sheet name to locate the rule when range_name is omitted. Defaults to first sheet.
+        gradient_points (Optional[Union[str, List[dict]]]): If provided, updates the rule to a gradient color scale using these points.
+
+    Returns:
+        str: Confirmation of the updated rule and the current rule state.
+    """
+    logger.info(
+        "[update_conditional_formatting] Invoked. Email: '%s', Spreadsheet: %s, Range: %s, Rule Index: %s",
+        user_google_email,
+        spreadsheet_id,
+        range_name,
+        rule_index,
+    )
+
+    if not isinstance(rule_index, int) or rule_index < 0:
+        raise UserInputError("rule_index must be a non-negative integer.")
+
+    condition_values_list = _parse_condition_values(condition_values)
+    gradient_points_list = _parse_gradient_points(gradient_points)
+
+    sheets, sheet_titles = await _fetch_sheets_with_rules(service, spreadsheet_id)
+
+    target_sheet = None
+    grid_range = None
+    if range_name:
+        grid_range = _parse_a1_range(range_name, sheets)
+        for sheet in sheets:
+            if sheet.get("properties", {}).get("sheetId") == grid_range.get("sheetId"):
+                target_sheet = sheet
+                break
+    else:
+        target_sheet = _select_sheet(sheets, sheet_name)
+
+    if target_sheet is None:
+        raise UserInputError(
+            "Target sheet not found while updating conditional formatting."
+        )
+
+    sheet_props = target_sheet.get("properties", {})
+    sheet_id = sheet_props.get("sheetId")
+    sheet_title = sheet_props.get("title", f"Sheet {sheet_id}")
+
+    rules = target_sheet.get("conditionalFormats", []) or []
+    if rule_index >= len(rules):
+        raise UserInputError(
+            f"rule_index {rule_index} is out of range for sheet '{sheet_title}' (current count: {len(rules)})."
+        )
+
+    existing_rule = rules[rule_index]
+    ranges_to_use = existing_rule.get("ranges", [])
+    if range_name:
+        ranges_to_use = [grid_range]
+    if not ranges_to_use:
+        ranges_to_use = [{"sheetId": sheet_id}]
+
+    new_rule = None
+    rule_desc = ""
+    values_desc = ""
+    format_desc = ""
+
+    if gradient_points_list is not None:
+        new_rule = _build_gradient_rule(ranges_to_use, gradient_points_list)
+        rule_desc = "gradient"
+        format_desc = f"gradient points {len(gradient_points_list)}"
+    elif "gradientRule" in existing_rule:
+        if any([background_color, text_color, condition_type, condition_values_list]):
+            raise UserInputError(
+                "Existing rule is a gradient rule. Provide gradient_points to update it, or omit formatting/condition parameters to keep it unchanged."
+            )
+        new_rule = {
+            "ranges": ranges_to_use,
+            "gradientRule": existing_rule.get("gradientRule", {}),
+        }
+        rule_desc = "gradient"
+        format_desc = "gradient (unchanged)"
+    else:
+        existing_boolean = existing_rule.get("booleanRule", {})
+        existing_condition = existing_boolean.get("condition", {})
+        existing_format = copy.deepcopy(existing_boolean.get("format", {}))
+
+        cond_type = (condition_type or existing_condition.get("type", "")).upper()
+        if not cond_type:
+            raise UserInputError("condition_type is required for boolean rules.")
+        if cond_type not in CONDITION_TYPES:
+            raise UserInputError(
+                f"condition_type must be one of {sorted(CONDITION_TYPES)}."
+            )
+
+        if condition_values_list is not None:
+            cond_values = [
+                {"userEnteredValue": str(val)} for val in condition_values_list
+            ]
+        else:
+            cond_values = existing_condition.get("values")
+
+        new_format = copy.deepcopy(existing_format) if existing_format else {}
+        if background_color is not None:
+            bg_color_parsed = _parse_hex_color(background_color)
+            if bg_color_parsed:
+                new_format["backgroundColor"] = bg_color_parsed
+            elif "backgroundColor" in new_format:
+                del new_format["backgroundColor"]
+        if text_color is not None:
+            text_color_parsed = _parse_hex_color(text_color)
+            text_format = copy.deepcopy(new_format.get("textFormat", {}))
+            if text_color_parsed:
+                text_format["foregroundColor"] = text_color_parsed
+            elif "foregroundColor" in text_format:
+                del text_format["foregroundColor"]
+            if text_format:
+                new_format["textFormat"] = text_format
+            elif "textFormat" in new_format:
+                del new_format["textFormat"]
+
+        if not new_format:
+            raise UserInputError("At least one format option must remain on the rule.")
+
+        new_rule = {
+            "ranges": ranges_to_use,
+            "booleanRule": {
+                "condition": {"type": cond_type},
+                "format": new_format,
+            },
+        }
+        if cond_values:
+            new_rule["booleanRule"]["condition"]["values"] = cond_values
+
+        rule_desc = cond_type
+        if condition_values_list:
+            values_desc = f" with values {condition_values_list}"
+        format_parts = []
+        if "backgroundColor" in new_format:
+            format_parts.append("background updated")
+        if "textFormat" in new_format and new_format["textFormat"].get(
+            "foregroundColor"
+        ):
+            format_parts.append("text color updated")
+        format_desc = ", ".join(format_parts) if format_parts else "format preserved"
+
+    new_rules_state = copy.deepcopy(rules)
+    new_rules_state[rule_index] = new_rule
+
+    request_body = {
+        "requests": [
+            {
+                "updateConditionalFormatRule": {
+                    "index": rule_index,
+                    "sheetId": sheet_id,
+                    "rule": new_rule,
+                }
+            }
+        ]
+    }
+
+    await asyncio.to_thread(
+        service.spreadsheets()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
+        .execute
+    )
+
+    state_text = _format_conditional_rules_section(
+        sheet_title, new_rules_state, sheet_titles, indent=""
+    )
+
+    return "\n".join(
+        [
+            f"Updated conditional format at index {rule_index} on sheet '{sheet_title}' in spreadsheet {spreadsheet_id} "
+            f"for {user_google_email}: {rule_desc}{values_desc}; format: {format_desc}.",
+            state_text,
+        ]
+    )
+
+
+@server.tool()
+@handle_http_errors("delete_conditional_formatting", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def delete_conditional_formatting(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    rule_index: int,
+    sheet_name: Optional[str] = None,
+) -> str:
+    """
+    Deletes an existing conditional formatting rule by index on a sheet.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        spreadsheet_id (str): The ID of the spreadsheet. Required.
+        rule_index (int): Index of the rule to delete (0-based).
+        sheet_name (Optional[str]): Name of the sheet that contains the rule. Defaults to the first sheet if not provided.
+
+    Returns:
+        str: Confirmation of the deletion and the current rule state.
+    """
+    logger.info(
+        "[delete_conditional_formatting] Invoked. Email: '%s', Spreadsheet: %s, Sheet: %s, Rule Index: %s",
+        user_google_email,
+        spreadsheet_id,
+        sheet_name,
+        rule_index,
+    )
+
+    if not isinstance(rule_index, int) or rule_index < 0:
+        raise UserInputError("rule_index must be a non-negative integer.")
+
+    sheets, sheet_titles = await _fetch_sheets_with_rules(service, spreadsheet_id)
+    target_sheet = _select_sheet(sheets, sheet_name)
+
+    sheet_props = target_sheet.get("properties", {})
+    sheet_id = sheet_props.get("sheetId")
+    target_sheet_name = sheet_props.get("title", f"Sheet {sheet_id}")
+    rules = target_sheet.get("conditionalFormats", []) or []
+    if rule_index >= len(rules):
+        raise UserInputError(
+            f"rule_index {rule_index} is out of range for sheet '{target_sheet_name}' (current count: {len(rules)})."
+        )
+
+    new_rules_state = copy.deepcopy(rules)
+    del new_rules_state[rule_index]
+
+    request_body = {
+        "requests": [
+            {
+                "deleteConditionalFormatRule": {
+                    "index": rule_index,
+                    "sheetId": sheet_id,
+                }
+            }
+        ]
+    }
+
+    await asyncio.to_thread(
+        service.spreadsheets()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body=request_body)
+        .execute
+    )
+
+    state_text = _format_conditional_rules_section(
+        target_sheet_name, new_rules_state, sheet_titles, indent=""
+    )
+
+    return "\n".join(
+        [
+            f"Deleted conditional format at index {rule_index} on sheet '{target_sheet_name}' in spreadsheet {spreadsheet_id} for {user_google_email}.",
+            state_text,
+        ]
+    )

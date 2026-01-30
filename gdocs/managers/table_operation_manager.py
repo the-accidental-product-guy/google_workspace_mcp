@@ -9,7 +9,16 @@ import logging
 import asyncio
 from typing import List, Dict, Any, Tuple
 
-from gdocs.docs_helpers import create_insert_table_request
+from gdocs.docs_helpers import (
+    create_insert_table_request,
+    create_insert_table_row_request,
+    create_insert_table_column_request,
+    create_delete_table_row_request,
+    create_delete_table_column_request,
+    create_update_table_cell_style_request,
+    create_merge_table_cells_request,
+    create_unmerge_table_cells_request,
+)
 from gdocs.docs_structure import find_tables
 from gdocs.docs_tables import validate_table_data
 
@@ -370,3 +379,334 @@ class TableOperationManager:
                     )
 
         return population_count
+
+    async def insert_row(
+        self,
+        document_id: str,
+        table_index: int,
+        row_index: int,
+        insert_below: bool = True,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Insert a new row into an existing table.
+
+        Args:
+            document_id: ID of the document
+            table_index: Index of the table (0-based)
+            row_index: Row to insert relative to
+            insert_below: If True, insert below; if False, insert above
+
+        Returns:
+            Tuple of (success, message, metadata)
+        """
+        try:
+            tables = await self._get_document_tables(document_id)
+            if table_index >= len(tables):
+                return (
+                    False,
+                    f"Table index {table_index} not found. Document has {len(tables)} tables",
+                    {},
+                )
+
+            table_start = tables[table_index]["start_index"]
+
+            requests = [create_insert_table_row_request(table_start, row_index, insert_below)]
+
+            await asyncio.to_thread(
+                self.service.documents()
+                .batchUpdate(documentId=document_id, body={"requests": requests})
+                .execute
+            )
+
+            position = "below" if insert_below else "above"
+            return True, f"Inserted row {position} row {row_index}", {"table_index": table_index}
+
+        except Exception as e:
+            return False, f"Failed to insert row: {str(e)}", {}
+
+    async def insert_column(
+        self,
+        document_id: str,
+        table_index: int,
+        column_index: int,
+        insert_right: bool = True,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Insert a new column into an existing table.
+
+        Args:
+            document_id: ID of the document
+            table_index: Index of the table (0-based)
+            column_index: Column to insert relative to
+            insert_right: If True, insert to the right; if False, insert to the left
+
+        Returns:
+            Tuple of (success, message, metadata)
+        """
+        try:
+            tables = await self._get_document_tables(document_id)
+            if table_index >= len(tables):
+                return (
+                    False,
+                    f"Table index {table_index} not found. Document has {len(tables)} tables",
+                    {},
+                )
+
+            table_start = tables[table_index]["start_index"]
+
+            requests = [create_insert_table_column_request(table_start, column_index, insert_right)]
+
+            await asyncio.to_thread(
+                self.service.documents()
+                .batchUpdate(documentId=document_id, body={"requests": requests})
+                .execute
+            )
+
+            position = "right of" if insert_right else "left of"
+            return True, f"Inserted column {position} column {column_index}", {"table_index": table_index}
+
+        except Exception as e:
+            return False, f"Failed to insert column: {str(e)}", {}
+
+    async def delete_row(
+        self,
+        document_id: str,
+        table_index: int,
+        row_index: int,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Delete a row from an existing table.
+
+        Args:
+            document_id: ID of the document
+            table_index: Index of the table (0-based)
+            row_index: Row to delete
+
+        Returns:
+            Tuple of (success, message, metadata)
+        """
+        try:
+            tables = await self._get_document_tables(document_id)
+            if table_index >= len(tables):
+                return (
+                    False,
+                    f"Table index {table_index} not found. Document has {len(tables)} tables",
+                    {},
+                )
+
+            table_start = tables[table_index]["start_index"]
+
+            requests = [create_delete_table_row_request(table_start, row_index)]
+
+            await asyncio.to_thread(
+                self.service.documents()
+                .batchUpdate(documentId=document_id, body={"requests": requests})
+                .execute
+            )
+
+            return True, f"Deleted row {row_index}", {"table_index": table_index}
+
+        except Exception as e:
+            return False, f"Failed to delete row: {str(e)}", {}
+
+    async def delete_column(
+        self,
+        document_id: str,
+        table_index: int,
+        column_index: int,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Delete a column from an existing table.
+
+        Args:
+            document_id: ID of the document
+            table_index: Index of the table (0-based)
+            column_index: Column to delete
+
+        Returns:
+            Tuple of (success, message, metadata)
+        """
+        try:
+            tables = await self._get_document_tables(document_id)
+            if table_index >= len(tables):
+                return (
+                    False,
+                    f"Table index {table_index} not found. Document has {len(tables)} tables",
+                    {},
+                )
+
+            table_start = tables[table_index]["start_index"]
+
+            requests = [create_delete_table_column_request(table_start, column_index)]
+
+            await asyncio.to_thread(
+                self.service.documents()
+                .batchUpdate(documentId=document_id, body={"requests": requests})
+                .execute
+            )
+
+            return True, f"Deleted column {column_index}", {"table_index": table_index}
+
+        except Exception as e:
+            return False, f"Failed to delete column: {str(e)}", {}
+
+    async def format_cells(
+        self,
+        document_id: str,
+        table_index: int,
+        row_start: int,
+        row_end: int,
+        column_start: int,
+        column_end: int,
+        style: Dict[str, Any],
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Format cells in a table.
+
+        Args:
+            document_id: ID of the document
+            table_index: Index of the table (0-based)
+            row_start: Starting row (inclusive)
+            row_end: Ending row (exclusive)
+            column_start: Starting column (inclusive)
+            column_end: Ending column (exclusive)
+            style: Style dictionary with keys like background_color, border_color, etc.
+
+        Returns:
+            Tuple of (success, message, metadata)
+        """
+        try:
+            tables = await self._get_document_tables(document_id)
+            if table_index >= len(tables):
+                return (
+                    False,
+                    f"Table index {table_index} not found. Document has {len(tables)} tables",
+                    {},
+                )
+
+            table_start = tables[table_index]["start_index"]
+
+            requests = [create_update_table_cell_style_request(
+                table_start, row_start, row_end, column_start, column_end, style
+            )]
+
+            await asyncio.to_thread(
+                self.service.documents()
+                .batchUpdate(documentId=document_id, body={"requests": requests})
+                .execute
+            )
+
+            return (
+                True,
+                f"Formatted cells [{row_start}:{row_end}, {column_start}:{column_end}]",
+                {"table_index": table_index, "style_keys": list(style.keys())}
+            )
+
+        except Exception as e:
+            return False, f"Failed to format cells: {str(e)}", {}
+
+    async def merge_cells(
+        self,
+        document_id: str,
+        table_index: int,
+        row_start: int,
+        row_end: int,
+        column_start: int,
+        column_end: int,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Merge cells in a table.
+
+        Args:
+            document_id: ID of the document
+            table_index: Index of the table (0-based)
+            row_start: Starting row (inclusive)
+            row_end: Ending row (exclusive)
+            column_start: Starting column (inclusive)
+            column_end: Ending column (exclusive)
+
+        Returns:
+            Tuple of (success, message, metadata)
+        """
+        try:
+            tables = await self._get_document_tables(document_id)
+            if table_index >= len(tables):
+                return (
+                    False,
+                    f"Table index {table_index} not found. Document has {len(tables)} tables",
+                    {},
+                )
+
+            table_start = tables[table_index]["start_index"]
+
+            requests = [create_merge_table_cells_request(
+                table_start, row_start, row_end, column_start, column_end
+            )]
+
+            await asyncio.to_thread(
+                self.service.documents()
+                .batchUpdate(documentId=document_id, body={"requests": requests})
+                .execute
+            )
+
+            return (
+                True,
+                f"Merged cells [{row_start}:{row_end}, {column_start}:{column_end}]",
+                {"table_index": table_index}
+            )
+
+        except Exception as e:
+            return False, f"Failed to merge cells: {str(e)}", {}
+
+    async def unmerge_cells(
+        self,
+        document_id: str,
+        table_index: int,
+        row_start: int,
+        row_end: int,
+        column_start: int,
+        column_end: int,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Unmerge previously merged cells in a table.
+
+        Args:
+            document_id: ID of the document
+            table_index: Index of the table (0-based)
+            row_start: Starting row (inclusive)
+            row_end: Ending row (exclusive)
+            column_start: Starting column (inclusive)
+            column_end: Ending column (exclusive)
+
+        Returns:
+            Tuple of (success, message, metadata)
+        """
+        try:
+            tables = await self._get_document_tables(document_id)
+            if table_index >= len(tables):
+                return (
+                    False,
+                    f"Table index {table_index} not found. Document has {len(tables)} tables",
+                    {},
+                )
+
+            table_start = tables[table_index]["start_index"]
+
+            requests = [create_unmerge_table_cells_request(
+                table_start, row_start, row_end, column_start, column_end
+            )]
+
+            await asyncio.to_thread(
+                self.service.documents()
+                .batchUpdate(documentId=document_id, body={"requests": requests})
+                .execute
+            )
+
+            return (
+                True,
+                f"Unmerged cells [{row_start}:{row_end}, {column_start}:{column_end}]",
+                {"table_index": table_index}
+            )
+
+        except Exception as e:
+            return False, f"Failed to unmerge cells: {str(e)}", {}

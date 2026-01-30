@@ -16,6 +16,16 @@ from gdocs.docs_helpers import (
     create_find_replace_request,
     create_insert_table_request,
     create_insert_page_break_request,
+    create_insert_table_row_request,
+    create_insert_table_column_request,
+    create_delete_table_row_request,
+    create_delete_table_column_request,
+    create_update_table_cell_style_request,
+    create_merge_table_cells_request,
+    create_update_paragraph_style_request,
+    create_insert_section_break_request,
+    create_named_range_request,
+    create_replace_named_range_content_request,
     validate_operation,
 )
 
@@ -227,15 +237,101 @@ class BatchOperationManager:
             )
             description = f"find/replace '{op['find_text']}' → '{op['replace_text']}'"
 
+        # Table row/column operations
+        elif op_type == "insert_table_row":
+            request = create_insert_table_row_request(
+                op["table_start_index"], op["row_index"], op.get("insert_below", True)
+            )
+            description = f"insert row at table index {op['table_start_index']}"
+
+        elif op_type == "delete_table_row":
+            request = create_delete_table_row_request(
+                op["table_start_index"], op["row_index"]
+            )
+            description = f"delete row {op['row_index']} from table"
+
+        elif op_type == "insert_table_column":
+            request = create_insert_table_column_request(
+                op["table_start_index"], op["column_index"], op.get("insert_right", True)
+            )
+            description = f"insert column at table index {op['table_start_index']}"
+
+        elif op_type == "delete_table_column":
+            request = create_delete_table_column_request(
+                op["table_start_index"], op["column_index"]
+            )
+            description = f"delete column {op['column_index']} from table"
+
+        elif op_type == "format_table_cells":
+            style = {}
+            for key in ["background_color", "border_color", "border_width",
+                       "padding_top", "padding_bottom", "padding_left", "padding_right",
+                       "content_alignment"]:
+                if key in op:
+                    style[key] = op[key]
+            request = create_update_table_cell_style_request(
+                op["table_start_index"],
+                op["row_start"], op["row_end"],
+                op["column_start"], op["column_end"],
+                style
+            )
+            description = f"format cells [{op['row_start']}:{op['row_end']}, {op['column_start']}:{op['column_end']}]"
+
+        elif op_type == "merge_table_cells":
+            request = create_merge_table_cells_request(
+                op["table_start_index"],
+                op["row_start"], op["row_end"],
+                op["column_start"], op["column_end"]
+            )
+            description = f"merge cells [{op['row_start']}:{op['row_end']}, {op['column_start']}:{op['column_end']}]"
+
+        # Paragraph operations
+        elif op_type == "update_paragraph_style":
+            request = create_update_paragraph_style_request(
+                op["start_index"], op["end_index"],
+                alignment=op.get("alignment"),
+                line_spacing=op.get("line_spacing"),
+                space_above=op.get("space_above"),
+                space_below=op.get("space_below"),
+                indent_first_line=op.get("indent_first_line"),
+                indent_start=op.get("indent_start"),
+                indent_end=op.get("indent_end"),
+                named_style_type=op.get("named_style_type"),
+            )
+            description = f"update paragraph style {op['start_index']}-{op['end_index']}"
+
+        # Section operations
+        elif op_type == "insert_section_break":
+            request = create_insert_section_break_request(
+                op["index"], op.get("section_type", "NEXT_PAGE")
+            )
+            description = f"insert section break at {op['index']}"
+
+        # Named range operations
+        elif op_type == "create_named_range":
+            request = create_named_range_request(
+                op["name"], op["start_index"], op["end_index"]
+            )
+            description = f"create named range '{op['name']}'"
+
+        elif op_type == "replace_named_range_content":
+            request = create_replace_named_range_content_request(
+                op["text"],
+                named_range_id=op.get("named_range_id"),
+                name=op.get("name")
+            )
+            identifier = op.get("named_range_id") or op.get("name", "unknown")
+            description = f"replace content in named range '{identifier}'"
+
         else:
             supported_types = [
-                "insert_text",
-                "delete_text",
-                "replace_text",
-                "format_text",
-                "insert_table",
-                "insert_page_break",
-                "find_replace",
+                "insert_text", "delete_text", "replace_text", "format_text",
+                "insert_table", "insert_page_break", "find_replace",
+                "insert_table_row", "delete_table_row",
+                "insert_table_column", "delete_table_column",
+                "format_table_cells", "merge_table_cells",
+                "update_paragraph_style", "insert_section_break",
+                "create_named_range", "replace_named_range_content",
             ]
             raise ValueError(
                 f"Unsupported operation type '{op_type}'. Supported: {', '.join(supported_types)}"
@@ -293,6 +389,7 @@ class BatchOperationManager:
         """
         return {
             "supported_operations": {
+                # Text operations
                 "insert_text": {
                     "required": ["index", "text"],
                     "description": "Insert text at specified index",
@@ -308,38 +405,83 @@ class BatchOperationManager:
                 "format_text": {
                     "required": ["start_index", "end_index"],
                     "optional": [
-                        "bold",
-                        "italic",
-                        "underline",
-                        "font_size",
-                        "font_family",
-                        "text_color",
-                        "background_color",
+                        "bold", "italic", "underline", "font_size",
+                        "font_family", "text_color", "background_color",
                     ],
                     "description": "Apply formatting to text range",
-                },
-                "insert_table": {
-                    "required": ["index", "rows", "columns"],
-                    "description": "Insert table at specified index",
-                },
-                "insert_page_break": {
-                    "required": ["index"],
-                    "description": "Insert page break at specified index",
                 },
                 "find_replace": {
                     "required": ["find_text", "replace_text"],
                     "optional": ["match_case"],
                     "description": "Find and replace text throughout document",
                 },
+                # Table operations
+                "insert_table": {
+                    "required": ["index", "rows", "columns"],
+                    "description": "Insert table at specified index",
+                },
+                "insert_table_row": {
+                    "required": ["table_start_index", "row_index"],
+                    "optional": ["insert_below"],
+                    "description": "Insert row in table",
+                },
+                "delete_table_row": {
+                    "required": ["table_start_index", "row_index"],
+                    "description": "Delete row from table",
+                },
+                "insert_table_column": {
+                    "required": ["table_start_index", "column_index"],
+                    "optional": ["insert_right"],
+                    "description": "Insert column in table",
+                },
+                "delete_table_column": {
+                    "required": ["table_start_index", "column_index"],
+                    "description": "Delete column from table",
+                },
+                "format_table_cells": {
+                    "required": ["table_start_index", "row_start", "row_end", "column_start", "column_end"],
+                    "optional": ["background_color", "border_color", "border_width", "content_alignment"],
+                    "description": "Format table cells",
+                },
+                "merge_table_cells": {
+                    "required": ["table_start_index", "row_start", "row_end", "column_start", "column_end"],
+                    "description": "Merge table cells",
+                },
+                # Structure operations
+                "insert_page_break": {
+                    "required": ["index"],
+                    "description": "Insert page break at specified index",
+                },
+                "insert_section_break": {
+                    "required": ["index"],
+                    "optional": ["section_type"],
+                    "description": "Insert section break (NEXT_PAGE or CONTINUOUS)",
+                },
+                # Paragraph operations
+                "update_paragraph_style": {
+                    "required": ["start_index", "end_index"],
+                    "optional": [
+                        "alignment", "line_spacing", "space_above", "space_below",
+                        "indent_first_line", "indent_start", "indent_end", "named_style_type"
+                    ],
+                    "description": "Update paragraph styling",
+                },
+                # Named range operations
+                "create_named_range": {
+                    "required": ["name", "start_index", "end_index"],
+                    "description": "Create a named range",
+                },
+                "replace_named_range_content": {
+                    "required": ["text"],
+                    "optional": ["named_range_id", "name"],
+                    "description": "Replace content in named range",
+                },
             },
             "example_operations": [
                 {"type": "insert_text", "index": 1, "text": "Hello World"},
-                {
-                    "type": "format_text",
-                    "start_index": 1,
-                    "end_index": 12,
-                    "bold": True,
-                },
+                {"type": "format_text", "start_index": 1, "end_index": 12, "bold": True},
                 {"type": "insert_table", "index": 20, "rows": 2, "columns": 3},
+                {"type": "insert_table_row", "table_start_index": 25, "row_index": 0, "insert_below": True},
+                {"type": "update_paragraph_style", "start_index": 1, "end_index": 50, "alignment": "CENTER"},
             ],
         }

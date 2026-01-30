@@ -513,6 +513,157 @@ class ValidationManager:
 
         return True, ""
 
+    def validate_paragraph_style_params(
+        self,
+        alignment: Optional[str] = None,
+        line_spacing: Optional[float] = None,
+        space_above: Optional[float] = None,
+        space_below: Optional[float] = None,
+        indent_first_line: Optional[float] = None,
+        indent_start: Optional[float] = None,
+        indent_end: Optional[float] = None,
+        named_style_type: Optional[str] = None,
+    ) -> Tuple[bool, str]:
+        """
+        Validate paragraph style parameters.
+
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        valid_alignments = ["START", "CENTER", "END", "JUSTIFIED"]
+        if alignment and alignment not in valid_alignments:
+            return False, f"alignment must be one of {valid_alignments}"
+
+        valid_styles = [
+            "NORMAL_TEXT", "TITLE", "SUBTITLE",
+            "HEADING_1", "HEADING_2", "HEADING_3",
+            "HEADING_4", "HEADING_5", "HEADING_6"
+        ]
+        if named_style_type and named_style_type not in valid_styles:
+            return False, f"named_style_type must be one of {valid_styles}"
+
+        # Validate numeric parameters
+        for value, name in [
+            (line_spacing, "line_spacing"),
+            (space_above, "space_above"),
+            (space_below, "space_below"),
+            (indent_first_line, "indent_first_line"),
+            (indent_start, "indent_start"),
+            (indent_end, "indent_end"),
+        ]:
+            if value is not None and not isinstance(value, (int, float)):
+                return False, f"{name} must be a number"
+
+        return True, ""
+
+    def validate_section_style_params(
+        self,
+        section_type: Optional[str] = None,
+        column_count: Optional[int] = None,
+    ) -> Tuple[bool, str]:
+        """
+        Validate section style parameters.
+
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        valid_section_types = ["NEXT_PAGE", "CONTINUOUS"]
+        if section_type and section_type not in valid_section_types:
+            return False, f"section_type must be one of {valid_section_types}"
+
+        if column_count is not None:
+            if not isinstance(column_count, int) or column_count < 1:
+                return False, "column_count must be a positive integer"
+
+        return True, ""
+
+    def validate_document_style_params(
+        self,
+        margin_top: Optional[float] = None,
+        margin_bottom: Optional[float] = None,
+        margin_left: Optional[float] = None,
+        margin_right: Optional[float] = None,
+        page_width: Optional[float] = None,
+        page_height: Optional[float] = None,
+    ) -> Tuple[bool, str]:
+        """
+        Validate document style parameters.
+
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        for value, name in [
+            (margin_top, "margin_top"),
+            (margin_bottom, "margin_bottom"),
+            (margin_left, "margin_left"),
+            (margin_right, "margin_right"),
+            (page_width, "page_width"),
+            (page_height, "page_height"),
+        ]:
+            if value is not None:
+                if not isinstance(value, (int, float)):
+                    return False, f"{name} must be a number"
+                if value < 0:
+                    return False, f"{name} cannot be negative"
+
+        return True, ""
+
+    def validate_named_range_params(
+        self,
+        name: str,
+        start_index: int,
+        end_index: int,
+    ) -> Tuple[bool, str]:
+        """
+        Validate named range parameters.
+
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        if not name or not name.strip():
+            return False, "Named range name cannot be empty"
+
+        if not isinstance(name, str):
+            return False, "Named range name must be a string"
+
+        is_valid, error_msg = self.validate_index_range(start_index, end_index)
+        if not is_valid:
+            return False, error_msg
+
+        return True, ""
+
+    def validate_table_cell_range(
+        self,
+        row_start: int,
+        row_end: int,
+        col_start: int,
+        col_end: int,
+    ) -> Tuple[bool, str]:
+        """
+        Validate table cell range parameters.
+
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        for value, name in [
+            (row_start, "row_start"),
+            (row_end, "row_end"),
+            (col_start, "col_start"),
+            (col_end, "col_end"),
+        ]:
+            if not isinstance(value, int):
+                return False, f"{name} must be an integer"
+            if value < 0:
+                return False, f"{name} cannot be negative"
+
+        if row_end <= row_start:
+            return False, f"row_end ({row_end}) must be greater than row_start ({row_start})"
+
+        if col_end <= col_start:
+            return False, f"col_end ({col_end}) must be greater than col_start ({col_start})"
+
+        return True, ""
+
     def get_validation_summary(self) -> Dict[str, Any]:
         """
         Get a summary of all validation rules and constraints.
@@ -523,18 +674,31 @@ class ValidationManager:
         return {
             "constraints": self.validation_rules.copy(),
             "supported_operations": {
-                "table_operations": ["create_table", "populate_table"],
-                "text_operations": ["insert_text", "format_text", "find_replace"],
-                "element_operations": [
-                    "insert_table",
-                    "insert_list",
-                    "insert_page_break",
+                "table_operations": [
+                    "create_table", "populate_table", "insert_row", "insert_column",
+                    "delete_row", "delete_column", "format_cells", "merge_cells",
+                    "set_column_width", "set_row_height", "pin_header_rows"
                 ],
-                "header_footer_operations": ["update_header", "update_footer"],
+                "text_operations": ["insert_text", "format_text", "find_replace"],
+                "paragraph_operations": ["update_paragraph_style", "remove_bullets"],
+                "element_operations": [
+                    "insert_table", "insert_list", "insert_page_break",
+                    "insert_section_break", "insert_footnote"
+                ],
+                "header_footer_operations": [
+                    "update_header", "update_footer", "delete_header", "delete_footer"
+                ],
+                "named_range_operations": [
+                    "create_named_range", "delete_named_range", "replace_content"
+                ],
+                "document_tab_operations": [
+                    "add_tab", "delete_tab", "update_tab_properties"
+                ],
             },
             "data_formats": {
                 "table_data": "2D list of strings: [['col1', 'col2'], ['row1col1', 'row1col2']]",
                 "text_formatting": "Optional boolean/integer parameters for styling",
                 "document_indices": "Non-negative integers for position specification",
+                "colors": "Hex string format '#RRGGBB'",
             },
         }

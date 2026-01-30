@@ -57,23 +57,51 @@ docs:
     - get_doc_content
     - create_doc
     - modify_doc_text
+    - search_docs
+    - create_table_with_data
+    - update_paragraph_style
   extended:
     - export_doc_to_pdf
-    - search_docs
     - find_and_replace_doc
     - list_docs_in_folder
     - insert_doc_elements
+    - insert_table_row
+    - insert_table_column
+    - delete_table_row
+    - delete_table_column
+    - format_table_cells
+    - merge_table_cells
+    - insert_section_break
+    - update_document_style
   complete:
     - insert_doc_image
     - update_doc_headers_footers
     - batch_update_doc
     - inspect_doc_structure
-    - create_table_with_data
     - debug_table_structure
     - read_document_comments
     - create_document_comment
     - reply_to_document_comment
     - resolve_document_comment
+    - set_table_column_width
+    - set_table_row_height
+    - unmerge_table_cells
+    - pin_table_header_rows
+    - remove_paragraph_bullets
+    - insert_footnote
+    - delete_header
+    - delete_footer
+    - create_doc_named_range
+    - delete_doc_named_range
+    - replace_doc_named_range_content
+    - list_doc_named_ranges
+    - replace_image
+    - delete_positioned_object
+    - mention_person
+    - add_document_tab
+    - delete_document_tab
+    - update_tab_properties
+    - list_document_tabs
 
 sheets:
   core:
